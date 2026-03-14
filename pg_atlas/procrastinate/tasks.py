@@ -19,6 +19,7 @@ SPDX-License-Identifier: MPL-2.0
 
 from __future__ import annotations
 
+import datetime
 import logging
 import os
 from pathlib import Path
@@ -121,6 +122,7 @@ def _list_org_repos(owner: str) -> list[dict[str, Any]]:
                     "default_branch": repo.default_branch,
                     "stars": repo.stargazers_count,
                     "forks": repo.forks_count,
+                    "pushed_at": repo.pushed_at,
                     "language": repo.language or "",
                     "topics": repo.topics,
                 }
@@ -153,6 +155,7 @@ def _get_single_repo(owner: str, repo_name: str) -> list[dict[str, Any]]:
                 "default_branch": repo.default_branch,
                 "stars": repo.stargazers_count,
                 "forks": repo.forks_count,
+                "pushed_at": repo.pushed_at,
                 "language": repo.language or "",
                 "topics": repo.topics,
             }
@@ -419,6 +422,7 @@ async def process_project(
         packages: list[dict[str, str]] = []
         adoption_stars = repo_info.get("stars", 0)
         adoption_forks = repo_info.get("forks", 0)
+        pushed_at: datetime.datetime | None = repo_info.get("pushed_at")
 
         if depsdev_info:
             packages = depsdev_info.package_versions
@@ -434,6 +438,7 @@ async def process_project(
             repo=repo_name,
             project_id=project_id,
             packages=packages,
+            latest_commit_date=pushed_at.isoformat() if pushed_at is not None else None,
             adoption_stars=adoption_stars,
             adoption_forks=adoption_forks,
         )
@@ -458,6 +463,7 @@ async def crawl_github_repo(
     packages: list[dict[str, str]],
     adoption_stars: int,
     adoption_forks: int,
+    latest_commit_date: str | None = None,
 ) -> None:
     """
     Crawl a single GitHub repository.
@@ -528,12 +534,20 @@ async def crawl_github_repo(
     repo_canonical_id = f"pkg:github/{owner}/{repo}"
     repo_url = f"https://github.com/{owner}/{repo}"
 
+    parsed_commit_date: datetime.datetime | None = None
+    if latest_commit_date is not None:
+        try:
+            parsed_commit_date = datetime.datetime.fromisoformat(latest_commit_date)
+        except ValueError:
+            logger.warning("crawl_github_repo: unparseable latest_commit_date=%r", latest_commit_date)
+
     await upsert_repo(
         canonical_id=repo_canonical_id,
         display_name=repo,
         latest_version=latest_version,
         project_id=project_id,
         repo_url=repo_url,
+        latest_commit_date=parsed_commit_date,
         adoption_stars=adoption_stars,
         adoption_forks=adoption_forks,
         releases=releases if releases else None,
