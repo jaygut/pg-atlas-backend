@@ -174,6 +174,18 @@ async def test_handle_sbom_submission_github_dep_graph(db_session: AsyncSession)
         "actor": "test-user",
     }
     raw = (FIXTURES / "github_dep_graph.spdx.json").read_bytes()
+
+    # Clear any prior submission for this exact file + repository so the
+    # duplicate-skip path doesn't fire and short-circuit the Repo upsert.
+    content_hash = hashlib.sha256(raw).hexdigest()
+    await db_session.execute(
+        SbomSubmission.__table__.delete().where(  # type: ignore[attr-defined]
+            SbomSubmission.__table__.c.sbom_content_hash == content_hash,
+            SbomSubmission.__table__.c.repository_claim == claims["repository"],
+        )
+    )
+    await db_session.commit()
+
     result = await handle_sbom_submission(db_session, raw, claims)
     assert result["repository"] == claims["repository"]
 

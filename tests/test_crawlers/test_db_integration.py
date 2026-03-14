@@ -4,9 +4,19 @@ Database integration tests for the registry crawler write path.
 Tests the critical DB logic: vertex upsert, edge confidence preservation,
 adoption column gating on Repo vs ExternalRepo, idempotency, and edge direction.
 
-These tests require a running PostgreSQL instance configured via
-``PG_ATLAS_DATABASE_URL``. They are skipped automatically when the variable
-is not set (e.g. in CI without a database service).
+These tests require a running PostgreSQL instance.  The connection URL is
+resolved in priority order:
+
+1. ``PG_ATLAS_TEST_DATABASE_URL`` — point this at a dedicated throwaway DB so
+   tests are fully isolated from your shared dev database.
+2. ``PG_ATLAS_DATABASE_URL`` — falls back to the shared dev DB when no
+   separate test DB is configured.  In this mode the ``clean_tables`` fixture
+   truncates *before* each test (clean start) but leaves test-inserted data
+   behind after the suite finishes, which is far less destructive than the old
+   bi-directional truncation.
+
+Tests are skipped automatically when neither variable is set (e.g. in CI
+without a database service).
 
 SPDX-FileCopyrightText: 2026 PG Atlas contributors
 SPDX-License-Identifier: MPL-2.0
@@ -40,8 +50,8 @@ from pg_atlas.db_models.repo_vertex import ExternalRepo, Repo, RepoVertex
 # ---------------------------------------------------------------------------
 
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("PG_ATLAS_DATABASE_URL"),
-    reason="PG_ATLAS_DATABASE_URL not set; skipping database integration tests",
+    not os.environ.get("PG_ATLAS_TEST_DATABASE_URL") and not os.environ.get("PG_ATLAS_DATABASE_URL"),
+    reason="Neither PG_ATLAS_TEST_DATABASE_URL nor PG_ATLAS_DATABASE_URL is set; skipping database integration tests",
 )
 
 
@@ -52,8 +62,20 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture
 async def db_engine() -> AsyncGenerator[Any, None]:
-    """Create a fresh async engine with NullPool for test isolation."""
-    engine = create_async_engine(settings.DATABASE_URL, poolclass=NullPool)
+    """Create a fresh async engine with NullPool for test isolation.
+
+    Uses ``PG_ATLAS_TEST_DATABASE_URL`` when set so that integration tests run
+    against a dedicated throwaway database instead of the shared dev database.
+    Falls back to ``PG_ATLAS_DATABASE_URL`` (via ``settings.DATABASE_URL``)
+    when the test-specific variable is absent.
+    """
+    # Prefer the dedicated test DB URL; fall back to the shared dev DB URL.
+    raw_url = os.environ.get("PG_ATLAS_TEST_DATABASE_URL") or settings.DATABASE_URL
+    # Reuse the same asyncpg driver rewrite that Settings applies.
+    from pg_atlas.config import Settings
+
+    resolved_url = Settings.coerce_async_driver(raw_url)
+    engine = create_async_engine(resolved_url, poolclass=NullPool)
     yield engine
     await engine.dispose()
 
@@ -67,19 +89,22 @@ async def db_session_factory(db_engine: Any) -> async_sessionmaker[AsyncSession]
 @pytest.fixture(autouse=True)
 async def clean_tables(db_session_factory: async_sessionmaker[AsyncSession]) -> AsyncGenerator[None, None]:
     """
-    Truncate crawler-affected tables before and after each test.
+    Truncate crawler-affected tables BEFORE each test only.
 
     Truncation runs with CASCADE to handle FK constraints between tables.
+
+    Teardown truncation is intentionally omitted:
+    - When ``PG_ATLAS_TEST_DATABASE_URL`` points at a dedicated test DB the
+      tables will be truncated again at the start of the next test run anyway.
+    - When only ``PG_ATLAS_DATABASE_URL`` (the shared dev DB) is in use,
+      leaving test-inserted rows behind is far less destructive than wiping
+      shared data in teardown.
     """
     async with db_session_factory() as session:
         await session.execute(text("TRUNCATE TABLE depends_on, repos, external_repos, repo_vertices CASCADE"))
         await session.commit()
 
     yield
-
-    async with db_session_factory() as session:
-        await session.execute(text("TRUNCATE TABLE depends_on, repos, external_repos, repo_vertices CASCADE"))
-        await session.commit()
 
 
 # ---------------------------------------------------------------------------

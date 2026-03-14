@@ -109,9 +109,12 @@ async def db_session() -> AsyncGenerator[Any, None]:
     """
     Real ``AsyncSession`` against the configured PostgreSQL database.
 
-    Skipped automatically when ``PG_ATLAS_DATABASE_URL`` is not set (e.g. in CI
-    without a database service).  Set the variable before running to enable
-    database integration tests.
+    Skipped automatically when neither ``PG_ATLAS_TEST_DATABASE_URL`` nor
+    ``PG_ATLAS_DATABASE_URL`` is set (e.g. in CI without a database service).
+
+    URL resolution order:
+    1. ``PG_ATLAS_TEST_DATABASE_URL`` — dedicated throwaway test DB (preferred).
+    2. ``PG_ATLAS_DATABASE_URL`` — shared dev DB (fallback).
 
     Each test gets a **fresh** engine (with ``NullPool``) so that asyncpg
     connections are never shared across event loops.  pytest-asyncio creates a
@@ -122,12 +125,16 @@ async def db_session() -> AsyncGenerator[Any, None]:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
     from sqlalchemy.pool import NullPool
 
+    from pg_atlas.config import Settings
     from pg_atlas.config import settings as app_settings
 
-    if not app_settings.DATABASE_URL:
-        pytest.skip("PG_ATLAS_DATABASE_URL not set; skipping database integration test")
+    # Prefer a dedicated test DB URL; fall back to the shared dev DB URL.
+    raw_url = os.environ.get("PG_ATLAS_TEST_DATABASE_URL") or app_settings.DATABASE_URL
+    if not raw_url:
+        pytest.skip("Neither PG_ATLAS_TEST_DATABASE_URL nor PG_ATLAS_DATABASE_URL is set; skipping database integration test")
 
-    engine = create_async_engine(app_settings.DATABASE_URL, poolclass=NullPool)
+    resolved_url = Settings.coerce_async_driver(raw_url)
+    engine = create_async_engine(resolved_url, poolclass=NullPool)
     try:
         async_session: async_sessionmaker[AsyncSession] = async_sessionmaker(
             engine, class_=AsyncSession, expire_on_commit=False
